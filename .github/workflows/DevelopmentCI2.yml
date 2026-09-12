@@ -1,0 +1,80 @@
+name: DevelopmentCI2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Development/**'
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: development
+  AWS_ACCOUNT_ID: ${{secrets.AWS_ACCOUNT_ID}}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  IMAGE_TAG: ${{ github.sha }}
+  DOCKER_IMAGE: ""  
+  ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+  ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
+  ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
+  APP_NAME: demo.com
+
+jobs:
+  build-and-push-ecr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set Docker image name
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "DOCKER_IMAGE=${{ env.ECR_REPOSITORY }}:${SHORT_SHA}" >> $GITHUB_ENV
+          echo "Docker image name: ${{ env.DOCKER_IMAGE }}"
+
+      - name: Login to Amazon ECR using AWS CLI
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set region ${{ env.AWS_REGION }}
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Build Docker image
+        run: |
+          docker build -t "${{ env.DOCKER_IMAGE }}" ./Development
+          echo "Docker build complete."
+
+      - name: Tag Docker image for ECR
+        run: |
+          ECR_IMAGE="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+          echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
+          docker tag "${{ env.DOCKER_IMAGE }}" "$ECR_IMAGE"
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push "${{ env.ECR_IMAGE }}"
+          echo "Docker push complete."
+
+      - name: Install ArgoCD CLI 
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/argocd
+
+      - name: Login to ArgoCD
+        run: |
+          argocd login $ARGOCD_SERVER \
+            --username $ARGOCD_USERNAME \
+            --password $ARGOCD_PASSWORD \
+            --insecure
+
+      - name: Generate ArgoCD token
+        id: token
+        run: |
+          TOKEN=$(argocd account generate-token)
+          echo "ARGOCD_TOKEN=$TOKEN" >> $GITHUB_ENV
